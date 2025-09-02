@@ -4,7 +4,7 @@ import torch.nn as nn
 import numpy as np
 import scipy.sparse
 import scipy.io
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, precision_score, recall_score
 from datetime import datetime
 import argparse
 
@@ -66,7 +66,12 @@ def train_dominant(args):
             A_hat, X_hat = model(attrs, adj)
             loss, struct_loss, feat_loss = loss_func(adj_label, A_hat, attrs, X_hat, args.alpha)
             score = loss.detach().cpu().numpy()
-            print("Epoch:", '%04d' % (epoch), 'Auc', roc_auc_score(label, score))
+            # print("Epoch:", '%04d' % (epoch), 'Auc', roc_auc_score(label, score))
+                    
+            print("Epoch:", '%04d' % (epoch),
+                'Auc', roc_auc_score(label, score),
+                'Precision', precision_score(label, score > 0.5),
+                'Recall', recall_score(label, score > 0.5))
 
 
 if __name__ == '__main__':
