@@ -133,3 +133,64 @@ def tokenize(texts: Union[str, List[str]], context_length: int = 128, truncate: 
         result[i, :len(tokens)] = torch.tensor(tokens)
 
     return result
+
+import torch
+
+def compute_cov_eig(X: torch.Tensor, freq=None):
+    # X: [N, D]
+    X = X.float()
+    Xc = X - X.mean(dim=0, keepdim=True)
+    # 공분산 (대칭)
+    cov = (Xc.T @ Xc) / (X.size(0) - 1)
+    # 대칭 행렬 고유분해(grad 가능, 디바이스 그대로)
+    lam, U = torch.linalg.eigh(cov)
+    return lam, U
+
+
+def pick_null_dim_by_tail(lam: torch.Tensor, keep_ratio: float = 0.95,    min_null: int = 1,          # d_null 하한
+    max_null: int | None = None # 필요하면 상한
+):
+    """
+    lam: 1D tensor of eigenvalues (from torch.linalg.eigh; 보통 오름차순)
+    return: (d_row:int, d_null:int)
+    """
+    assert lam.ndim == 1 and lam.numel() > 0, "lam must be 1D, non-empty"
+    # 1) 수치 안정: 음수 클램프, dtype
+    lam = lam.to(torch.float64).clamp_min(0)
+
+    # 수치 오차로 인한 아주 작은 음수값 클램프
+    lam = torch.clamp(lam, min=0)
+
+    # 2) 내림차순 정렬(큰 것부터 누적)
+    lam_sorted, _ = torch.sort(lam, descending=True)
+
+    total = lam_sorted.sum()
+    if total <= 0:
+        # 전부 0이면 정보가 없으니 전부 null로
+        d_row = 0
+        d_null = lam_sorted.numel()
+    else:
+        # 3) keep_ratio 안정화 (1.0 근처 방지)
+        keep_ratio = float(min(max(keep_ratio, 0.0), 0.999999))
+
+        var_ratio = lam_sorted / total
+        cum = torch.cumsum(var_ratio, dim=0)
+
+        # 4) 처음으로 keep_ratio를 "넘는" 위치 (right=True)
+        th = torch.tensor(keep_ratio, dtype=cum.dtype, device=cum.device)
+        idx = torch.searchsorted(cum, th, right=True)   # 0-based count
+
+        d_row = int(idx.item())  # 이미 "몇 개 유지할지" 개수
+        # 최소 1축은 유지하도록(원하면 제거 가능)
+        d_row = max(d_row, 1)
+        d_row = min(d_row, lam_sorted.numel())
+
+        d_null = lam_sorted.numel() - d_row
+
+        # 5) null 하한/상한 적용
+        if max_null is not None:
+            d_null = min(d_null, int(max_null))
+        d_null = max(d_null, int(min_null))
+        d_row = lam_sorted.numel() - d_null
+
+    return d_row, d_null

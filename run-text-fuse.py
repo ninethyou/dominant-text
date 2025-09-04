@@ -18,6 +18,7 @@ import scipy.sparse as sp
 
 from utils import tokenize
 from sentence_transformers import SentenceTransformer
+from utils import compute_cov_eig, pick_null_dim_by_tail
 
 
 
@@ -84,16 +85,8 @@ def train_dominant(args):
     # attrs_sp: (N,F) scipy.sparse
     X_np = attrs_sp.toarray()
     X_np = preprocessing.StandardScaler().fit_transform(X_np)
-    X = torch.tensor(X_np, dtype=torch.float32, device=args.device)
+    X = torch.tensor(X_np, dtype=torch.float64, device=args.device)
 
-    # ---- 5) 모델 준비 ----
-    model = Dominant(
-        feat_size=X.size(1),
-        hidden_size=args.hidden_dim,
-        dropout=args.dropout
-    ).to(args.device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # Data = DataHelper(arr_edge_index, args)
     # loader = DataLoader(Data, batch_size=args.batch_size, shuffle=True, num_workers=10)
@@ -104,6 +97,51 @@ def train_dominant(args):
     emb_text = st.encode(tit_list.tolist(),
                              normalize_embeddings=True, device=args.device) 
     emb_text = torch.tensor(emb_text, dtype=torch.float32, device=args.device) # (N, 384)
+
+    eps = 1e-12
+    lam, U = compute_cov_eig(emb_text, freq=None)  # svd
+
+    d_row, d_null = pick_null_dim_by_tail(lam, keep_ratio=0.95) #null space 뽑음
+
+    U_row = U[:, :d_row]                    # d_row 개만
+    S_row_inv_sqrt = torch.diag(1.0 / torch.sqrt(lam[:d_row] + eps)) # whitening singular value
+    P_row = U_row @ S_row_inv_sqrt     # 그런 space
+    P_row     = P_row.to(torch.float32) 
+
+    X = emb_text.to(torch.float32)
+    mu = X.mean(axis=0, keepdims=True)
+    X_row = (X - mu) @ P_row        # space 위로 투영
+
+    null_dim = pick_null_dim_by_tail(lam)
+
+    # 안전 캐스팅
+    X_row_init = torch.as_tensor(X_row, dtype=torch.float32)  # (N, d_row)
+    d_null = int(d_null)
+
+
+    # ---- 5) 모델 준비 ----
+    model = Dominant(
+        feat_size=X.size(1),
+        hidden_size=args.hidden_dim,
+        dropout=args.dropout,
+        X_row_init =  X_row,
+        d_null = d_null
+    ).to(args.device)
+
+
+    print("d_null =", d_null)
+    for n, p in model.named_parameters():
+        if p.numel() == 0:
+            print("ZERO PARAM:", n, p.shape, p.device)
+            
+    # NaN/Inf 체크
+    import math
+    for n, p in model.named_parameters():
+        if p.requires_grad and p.numel() and (torch.isnan(p).any() or torch.isinf(p).any()):
+            print("BAD PARAM:", n)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
 
     for epoch in range(args.epoch):
 
